@@ -1,4 +1,5 @@
 # LLM Chat Application Template
+Integração ErgoContexto IA.
 
 A simple, ready-to-deploy chat application template powered by Cloudflare Workers AI. This template provides a clean starting point for building AI chat applications with streaming responses.
 
