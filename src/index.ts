@@ -1,102 +1,31 @@
-/**
- * LLM Chat Application Template
- *
- * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
- *
- * @license MIT
- */
-import { Env, ChatMessage } from "./types";
+const ORIGEM = "https://rsalmaid.github.io";
 
-// Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
+const CORS = {
+  "Access-Control-Allow-Origin": ORIGEM,
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
-// Default system prompt
-const SYSTEM_PROMPT =
-	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
+const INSTRUCOES = `Você é um assistente técnico de ergonomia e fatores humanos.
+Analise uma triagem preliminar do aplicativo ErgoContexto.
+Regras obrigatórias:
+- Responda em português do Brasil, com linguagem técnica e objetiva.
+- Não altere a pontuação, a média nem a classificação calculadas pelo aplicativo.
+- Não avalie desempenho, atitude, capacidade ou culpa do trabalhador.
+- Não emita diagnóstico, não declare conformidade legal e não libere a atividade.
+- Use somente as informações recebidas. Se faltar informação, diga o que falta.
+- Toda sugestão depende da validação do avaliador.
+Responda exatamente nesta estrutura, em texto simples:
+SÍNTESE: (2 a 3 frases)
+PONTOS PRIORITÁRIOS: (até 3 itens, priorizando respostas 3 e depois 2)
+INFORMAÇÕES PARA APROFUNDAR: (até 3 perguntas)
+SUGESTÕES DE AÇÃO: (até 3 ações específicas e verificáveis)
+NECESSIDADE DE AVALIAÇÃO ESPECIALIZADA: (sim ou não, com justificativa curta)`;
 
 export default {
-	/**
-	 * Main request handler for the Worker
-	 */
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<Response> {
-		const url = new URL(request.url);
+  async fetch(request: Request, env: any): Promise {
+    const url = new URL(request.url);
 
-		// Handle static assets (frontend)
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
-			return env.ASSETS.fetch(request);
-		}
-
-		// API Routes
-		if (url.pathname === "/api/chat") {
-			// Handle POST requests for chat
-			if (request.method === "POST") {
-				return handleChatRequest(request, env);
-			}
-
-			// Method not allowed for other request types
-			return new Response("Method not allowed", { status: 405 });
-		}
-
-		// Handle 404 for unmatched routes
-		return new Response("Not found", { status: 404 });
-	},
-} satisfies ExportedHandler<Env>;
-
-/**
- * Handles chat API requests
- */
-async function handleChatRequest(
-	request: Request,
-	env: Env,
-): Promise<Response> {
-	try {
-		// Parse JSON request body
-		const { messages = [] } = (await request.json()) as {
-			messages: ChatMessage[];
-		};
-
-		// Add system prompt if not present
-		if (!messages.some((msg) => msg.role === "system")) {
-			messages.unshift({ role: "system", content: SYSTEM_PROMPT });
-		}
-
-		const inputs = {
-			messages,
-			max_tokens: 1024,
-			stream: true,
-		} satisfies AiTextGenerationInput & { stream: true };
-
-		const stream = await env.AI.run<typeof MODEL_ID>(MODEL_ID, inputs, {
-			// Uncomment to use AI Gateway
-			// gateway: {
-			//   id: "YOUR_GATEWAY_ID", // Replace with your AI Gateway ID
-			//   skipCache: false,      // Set to true to bypass cache
-			//   cacheTtl: 3600,        // Cache time-to-live in seconds
-			// },
-		});
-
-		return new Response(stream, {
-			headers: {
-				"content-type": "text/event-stream; charset=utf-8",
-				"cache-control": "no-cache",
-				connection: "keep-alive",
-			},
-		});
-	} catch (error) {
-		console.error("Error processing chat request:", error);
-		return new Response(
-			JSON.stringify({ error: "Failed to process request" }),
-			{
-				status: 500,
-				headers: { "content-type": "application/json" },
-			},
-		);
-	}
-}
+    if (url.pathname === "/api/ergo") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
