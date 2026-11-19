@@ -18,5 +18,13 @@
 	"ai": {
 		"binding": "AI"
 	},
+	// Limite de uso por IP: 10 análises por minuto (evita gastar a cota de IA com abuso).
+	"ratelimits": [
+		{
+			"name": "LIMITER",
+			"namespace_id": "1001",
+			"simple": { "limit": 10, "period": 60 }
+		}
+	],
 	"upload_source_maps": true
 }
