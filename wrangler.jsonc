@@ -26,5 +26,17 @@
 			"simple": { "limit": 10, "period": 60 }
 		}
 	],
+	// Login: preencha para que a IA só responda a usuários logados no Supabase. Vazio = IA aberta (como antes).
+	"vars": {
+		"SUPABASE_URL": "",
+		"SUPABASE_ANON_KEY": "",
+		// Avisos por e-mail (opcional). Remetente verificado na Resend, endereço do app e endereço público deste Worker.
+		"EMAIL_FROM": "ErgoContexto <avisos@ergocontexto.dev>",
+		"APP_URL": "https://ergocontexto.dev",
+		"WORKER_URL": ""
+	},
+	// Aviso diário de tarefas vencendo: 11:00 UTC = 08:00 em Brasília. Segredos (não ficam neste arquivo):
+	//   npx wrangler secret put SUPABASE_SERVICE_KEY   e   npx wrangler secret put RESEND_API_KEY
+	"triggers": { "crons": ["0 11 * * *"] },
 	"upload_source_maps": true
 }
