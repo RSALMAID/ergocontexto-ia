@@ -3,6 +3,9 @@ interface Env {
   ASSETS?: { fetch(request: Request): Promise<Response> };
   // Opcional: binding de rate limit (ver wrangler.jsonc). Se não existir, o limite é ignorado.
   LIMITER?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+  // Opcionais: se definidos, a IA só responde a quem estiver logado no Supabase.
+  SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
 }
 
 const MODELO_TEXTO = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -10,7 +13,7 @@ const MODELO_VISAO = "@cf/meta/llama-4-scout-17b-16e-instruct";
 const LIMITE_TEXTO = 24000; // bytes: análise e descrição
 const LIMITE_FOTO = 1_200_000; // bytes: foto (data URL) + catálogo
 
-const ORIGENS_PERMITIDAS = ["https://rsalmaid.github.io"];
+const ORIGENS_PERMITIDAS = ["https://rsalmaid.github.io", "https://ergocontexto.dev", "https://www.ergocontexto.dev"];
 const ORIGEM_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 function origemPermitida(origin: string | null): string | null {
@@ -23,7 +26,7 @@ function cors(origin: string): HeadersInit {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
@@ -88,6 +91,26 @@ ${REGRAS}
 
 Responda SOMENTE com JSON válido, sem markdown:
 {"itens":[{"id":"f1","nivel":2,"motivo":"curto","trecho":"curto"}],"semInformacao":["f3"],"resumo":"1 frase"}`;
+
+
+const INSTRUCOES_FORMULARIO = `Você lê a FOTO ou o SCAN de um formulário em papel chamado "ErgoContexto · Participação do trabalhador" (versão ERGO-PART-1), preenchido à mão por um avaliador de ergonomia durante uma conversa com um trabalhador. Transcreva o que está marcado ou escrito. Você NÃO interpreta, NÃO avalia e NÃO completa o que falta.
+
+${REGRAS}
+- Marque "sim" ou "nao" só quando a caixa correspondente estiver claramente marcada (X, traço, preenchida). Caixa vazia nos dois lados, rasurada ou duvidosa: use null. Nunca chute.
+- Para as perguntas, devolva exatamente um dos valores permitidos, ou null se não marcado ou ambíguo.
+- Para textos escritos à mão, transcreva fielmente em português, corrigindo só a ortografia óbvia. Se ilegível, use "" e liste o campo em naoLegiveis.
+- Se aparecer nome de pessoa (do trabalhador), NÃO o transcreva: troque por "[nome omitido]".
+- Se a imagem não for o formulário, estiver cortada, desfocada ou ilegível, devolva legibilidade "ruim" e explique em observacoes.
+
+Valores permitidos:
+- regiões: pescoco, ombros, dorsal, cotovelos, punhos, lombar, quadris, joelhos, pes. Cada uma com m12 (últimos 12 meses), d7 (últimos 7 dias), imp (limitou atividades): "sim", "nao" ou null.
+- q.real, q.pausas, q.autonomia, q.equip, q.treino, q.apoio, q.risco: "Sim", "Parcialmente" ou "Não".
+- q.ritmo: "Nunca", "Às vezes", "Frequentemente" ou "Sempre".
+- consent: true se a caixa de participação voluntária estiver marcada, false se estiver vazia, null se não der para saber.
+
+Responda SOMENTE com JSON válido, sem markdown:
+{"cod":"T1","funcao":"","turno":"","tempo":"","consent":null,"dor":{"pescoco":{"m12":null,"d7":null,"imp":null}},"q":{"real":null},"t":{"dificil":"","pior":"","sugestao":""},"legibilidade":"boa|regular|ruim","naoLegiveis":["campos que não deu para ler"],"observacoes":"1 frase sobre o que dificultou a leitura, se houve"}
+Inclua em "dor" as 9 regiões e em "q" as 8 perguntas.`;
 
 /* ------------------------------------------------------------------ */
 /* Utilitários                                                         */
@@ -305,11 +328,88 @@ async function descrever(env: Env, d: any) {
   return { status: 200, corpo: { itens, semInformacao: sem, resumo: cortar(j.resumo, 250) } };
 }
 
+
+const REG_FORM = ["pescoco", "ombros", "dorsal", "cotovelos", "punhos", "lombar", "quadris", "joelhos", "pes"];
+const SPN_FORM = ["Sim", "Parcialmente", "Não"];
+const ESC_FORM = ["Nunca", "Às vezes", "Frequentemente", "Sempre"];
+const Q_FORM: Record<string, string[]> = { real: SPN_FORM, ritmo: ESC_FORM, pausas: SPN_FORM, autonomia: SPN_FORM, equip: SPN_FORM, treino: SPN_FORM, apoio: SPN_FORM, risco: SPN_FORM };
+const sn = (v: unknown) => (v === "sim" || v === true ? true : v === "nao" || v === false ? false : null);
+
+async function lerFormulario(env: Env, d: any) {
+  const img = typeof d?.imagem === "string" ? d.imagem : "";
+  if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(img)) return { status: 400, corpo: { erro: "Imagem inválida. Envie foto ou scan em JPG ou PNG." } };
+  const r = await rodar(
+    env,
+    MODELO_VISAO,
+    [
+      { role: "system", content: INSTRUCOES_FORMULARIO },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Leia o formulário da imagem e devolva o JSON pedido." },
+          { type: "image_url", image_url: { url: img } },
+        ],
+      },
+    ],
+    1500,
+  );
+  const j = extrairJSON(r);
+  if (!j || typeof j !== "object") return { status: 502, corpo: { erro: "Não consegui ler o formulário. Fotografe de novo, reto, com boa luz e a página inteira." } };
+  const dor: Record<string, { m12: boolean | null; d7: boolean | null; imp: boolean | null }> = {};
+  for (const k of REG_FORM) {
+    const o = j.dor?.[k] ?? {};
+    dor[k] = { m12: sn(o.m12), d7: sn(o.d7), imp: sn(o.imp) };
+  }
+  const q: Record<string, string | null> = {};
+  for (const k of Object.keys(Q_FORM)) q[k] = Q_FORM[k].includes(j.q?.[k]) ? j.q[k] : null;
+  return {
+    status: 200,
+    corpo: {
+      cod: cortar(j.cod, 12),
+      funcao: cortar(j.funcao, 80),
+      turno: cortar(j.turno, 40),
+      tempo: cortar(j.tempo, 40),
+      consent: j.consent === true ? true : j.consent === false ? false : null,
+      dor,
+      q,
+      t: { dificil: cortar(j.t?.dificil, 500), pior: cortar(j.t?.pior, 500), sugestao: cortar(j.t?.sugestao, 500) },
+      legibilidade: ["boa", "regular", "ruim"].includes(j.legibilidade) ? j.legibilidade : "regular",
+      naoLegiveis: (Array.isArray(j.naoLegiveis) ? j.naoLegiveis : []).map((x: unknown) => cortar(x, 60)).filter(Boolean).slice(0, 12),
+      observacoes: cortar(j.observacoes, 300),
+    },
+  };
+}
+
 const ROTAS: Record<string, { limite: number; fn: (env: Env, dados: any) => Promise<{ status: number; corpo: unknown }> }> = {
   "/api/ergo": { limite: LIMITE_TEXTO, fn: analisar },
   "/api/ergo/foto": { limite: LIMITE_FOTO, fn: lerFoto },
   "/api/ergo/descrever": { limite: LIMITE_TEXTO, fn: descrever },
+  "/api/ergo/formulario": { limite: LIMITE_FOTO, fn: lerFormulario },
 };
+
+// Confere o token do Supabase (chama /auth/v1/user). Guarda o resultado por 60 s.
+const tokensOk = new Map<string, number>();
+async function autenticado(request: Request, env: Env): Promise<boolean> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return true; // login não configurado: segue como antes
+  const auth = request.headers.get("Authorization") ?? "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) return false;
+  const token = m[1];
+  const agora = Date.now();
+  const ate = tokensOk.get(token);
+  if (ate && ate > agora) return true;
+  try {
+    const r = await fetch(env.SUPABASE_URL.replace(/\/+$/, "") + "/auth/v1/user", {
+      headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: "Bearer " + token },
+    });
+    if (!r.ok) return false;
+    if (tokensOk.size > 500) tokensOk.clear();
+    tokensOk.set(token, agora + 60_000);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -338,6 +438,10 @@ export default {
         if (!success) {
           return Response.json({ erro: "Muitas solicitações seguidas. Aguarde um minuto." }, { status: 429, headers });
         }
+      }
+
+      if (!(await autenticado(request, env))) {
+        return Response.json({ erro: "Entre na sua conta para usar a IA." }, { status: 401, headers });
       }
 
       const texto = await request.text();
